@@ -195,9 +195,9 @@ class WanVace(WanT2V):
         area = image_size[0] * image_size[1]
         self.vid_proc.set_area(area)
         if area == 720*1280:
-            self.vid_proc.set_seq_len(75600)
+            self.vid_proc.set_seq_len(92760)
         elif area == 480*832:
-            self.vid_proc.set_seq_len(32760)
+            self.vid_proc.set_seq_len(92760)
         else:
             raise NotImplementedError(f'image_size {image_size} is not supported')
 

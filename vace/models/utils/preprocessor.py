@@ -148,14 +148,8 @@ class VaceVideoProcessor(object):
         return self.resize_crop(video, oh, ow)
 
     def _get_frameid_bbox_default(self, fps, frame_timestamps, h, w, crop_box, rng):
-        """Modified to handle identical start/end timestamps better"""
         target_fps = min(fps, self.max_fps)
-        
-        # Ensure frame_timestamps has unique values even when start/end are identical
-        # Calculate midpoint of each frame's time range
-        frame_midpoints = frame_timestamps.mean(axis=1)
-        max_duration = frame_midpoints[-1]
-        
+        duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         h, w = y2 - y1, x2 - x1
         ratio = h / w
@@ -163,7 +157,7 @@ class VaceVideoProcessor(object):
     
         area_z = min(self.seq_len, self.max_area / (dh * dw), (h // dh) * (w // dw))
         of = min(
-            (int(max_duration * target_fps) - 1) // df + 1,
+            (int(duration * target_fps) - 1) // df + 1,
             int(self.seq_len / area_z)
         )
     
@@ -175,33 +169,38 @@ class VaceVideoProcessor(object):
         oh *= dh
         ow *= dw
     
-        # sample frame ids - modified approach using midpoints
+        # sample frame ids
         target_duration = of / target_fps
-        begin = 0. if self.zero_start else rng.uniform(0, max(0.1, max_duration - target_duration))
+        begin = 0. if self.zero_start else rng.uniform(0, duration - target_duration)
         timestamps = np.linspace(begin, begin + target_duration, of)
         
-        # Use a more robust approach for frame selection
-        frame_ids = []
-        for ts in timestamps:
-            # Find the frame whose time range contains this timestamp,
-            # or the closest frame if none contain it
-            if ts <= frame_midpoints[0]:
-                frame_ids.append(0)
-            elif ts >= frame_midpoints[-1]:
-                frame_ids.append(len(frame_midpoints) - 1)
-            else:
-                # Find the closest frame midpoint
-                distances = np.abs(frame_midpoints - ts)
-                frame_ids.append(np.argmin(distances))
+        # Check if we have any identical timestamps
+        identical_timestamps = np.any(frame_timestamps[:, 0] == frame_timestamps[:, 1])
+        
+        if identical_timestamps:
+            # Use midpoint approach for problematic videos
+            frame_midpoints = frame_timestamps.mean(axis=1)
+            frame_ids = []
+            for ts in timestamps:
+                if ts <= frame_midpoints[0]:
+                    frame_ids.append(0)
+                elif ts >= frame_midpoints[-1]:
+                    frame_ids.append(len(frame_midpoints) - 1)
+                else:
+                    # Find the closest frame midpoint
+                    distances = np.abs(frame_midpoints - ts)
+                    frame_ids.append(np.argmin(distances))
+        else:
+            # Use original approach for normal videos
+            frame_ids = np.argmax(np.logical_and(
+                timestamps[:, None] >= frame_timestamps[None, :, 0],
+                timestamps[:, None] < frame_timestamps[None, :, 1]
+            ), axis=1).tolist()
         
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
 
     def _get_frameid_bbox_adjust_last(self, fps, frame_timestamps, h, w, crop_box, rng):
-        """Modified to handle identical start/end timestamps better"""
-        # Calculate midpoint of each frame's time range
-        frame_midpoints = frame_timestamps.mean(axis=1)
-        max_duration = frame_midpoints[-1]
-        
+        duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         h, w = y2 - y1, x2 - x1
         ratio = h / w
@@ -221,22 +220,33 @@ class VaceVideoProcessor(object):
         oh *= dh
         ow *= dw
     
-        # sample frame ids - using more robust approach
-        target_duration = max_duration
+        # sample frame ids
+        target_duration = duration
         target_fps = of / target_duration
         timestamps = np.linspace(0., target_duration, of)
         
-        # More robust frame selection
-        frame_ids = []
-        for ts in timestamps:
-            if ts <= frame_midpoints[0]:
-                frame_ids.append(0)
-            elif ts >= frame_midpoints[-1]:
-                frame_ids.append(len(frame_midpoints) - 1)
-            else:
-                # Find the closest frame midpoint
-                distances = np.abs(frame_midpoints - ts)
-                frame_ids.append(np.argmin(distances))
+        # Check if we have any identical timestamps
+        identical_timestamps = np.any(frame_timestamps[:, 0] == frame_timestamps[:, 1])
+        
+        if identical_timestamps:
+            # Use midpoint approach for problematic videos
+            frame_midpoints = frame_timestamps.mean(axis=1)
+            frame_ids = []
+            for ts in timestamps:
+                if ts <= frame_midpoints[0]:
+                    frame_ids.append(0)
+                elif ts >= frame_midpoints[-1]:
+                    frame_ids.append(len(frame_midpoints) - 1)
+                else:
+                    # Find the closest frame midpoint
+                    distances = np.abs(frame_midpoints - ts)
+                    frame_ids.append(np.argmin(distances))
+        else:
+            # Use original approach for normal videos
+            frame_ids = np.argmax(np.logical_and(
+                timestamps[:, None] >= frame_timestamps[None, :, 0],
+                timestamps[:, None] <= frame_timestamps[None, :, 1]
+            ), axis=1).tolist()
         
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
 
@@ -266,20 +276,29 @@ class VaceVideoProcessor(object):
         fps = readers[0].get_avg_fps()
         length = min([len(r) for r in readers])
         
-        # Get frame timestamps and handle potential issues
+        # Get frame timestamps
         frame_timestamps = np.array([readers[0].get_frame_timestamp(i) for i in range(length)], dtype=np.float32)
         
-        # Ensure timestamps are always increasing
-        # If we have identical start/end times, create a small difference
-        for i in range(len(frame_timestamps)):
-            if frame_timestamps[i, 0] == frame_timestamps[i, 1]:
+        # Only modify timestamps where start and end times are identical
+        identical_mask = frame_timestamps[:, 0] == frame_timestamps[:, 1]
+        if np.any(identical_mask):
+            # Create a copy to avoid modifying the original array during iteration
+            adjusted_timestamps = frame_timestamps.copy()
+            
+            # Find indices where start and end times are identical
+            identical_indices = np.where(identical_mask)[0]
+            
+            for i in identical_indices:
                 if i < len(frame_timestamps) - 1:
                     # Set end time to just before next frame's start time
                     next_start = frame_timestamps[i+1, 0]
-                    frame_timestamps[i, 1] = next_start - 1e-6
+                    adjusted_timestamps[i, 1] = next_start - 1e-6
                 else:
-                    # For last frame, make a small difference
-                    frame_timestamps[i, 1] = frame_timestamps[i, 0] + 1/fps
+                    # For last frame, make a small difference based on fps
+                    adjusted_timestamps[i, 1] = adjusted_timestamps[i, 0] + 1/fps
+            
+            # Use the adjusted timestamps
+            frame_timestamps = adjusted_timestamps
         
         h, w = readers[0].next().shape[:2]
         frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
@@ -288,7 +307,6 @@ class VaceVideoProcessor(object):
         videos = [reader.get_batch(frame_ids)[:, y1:y2, x1:x2, :] for reader in readers]
         videos = [self._video_preprocess(video, oh, ow) for video in videos]
         return *videos, frame_ids, (oh, ow), fps
-
 
 def prepare_source(src_video, src_mask, src_ref_images, num_frames, image_size, device):
     for i, (sub_src_video, sub_src_mask) in enumerate(zip(src_video, src_mask)):

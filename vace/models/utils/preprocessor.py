@@ -68,7 +68,6 @@ class VaceImageProcessor(object):
         return self.load_image_batch(data_key, data_key2, **kwargs)
 
     def load_image_batch(self, *data_key_batch, normalize=True, seq_len=None, **kwargs):
-        print("I")
         seq_len = self.seq_len if seq_len is None else seq_len
         imgs = []
         for data_key in data_key_batch:
@@ -150,126 +149,66 @@ class VaceVideoProcessor(object):
 
     def _get_frameid_bbox_default(self, fps, frame_timestamps, h, w, crop_box, rng):
         target_fps = min(fps, self.max_fps)
-        duration = frame_timestamps[-1, 1]
-        
+        duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         h, w = y2 - y1, x2 - x1
         ratio = h / w
         df, dh, dw = self.downsample
-        
-        # min/max area of the [latent video]
-        min_area_z = self.min_area / (dh * dw)
-        max_area_z = min(self.seq_len, self.max_area / (dh * dw), (h // dh) * (w // dw))
-        if min_area_z > max_area_z:
-            min_area_z, max_area_z = max_area_z, min_area_z
-        
-        # Sample a frame number of the [latent video]
-        rand_area_z = np.square(np.power(2, rng.uniform(
-            np.log2(np.sqrt(min_area_z)),
-            np.log2(np.sqrt(max_area_z))
-        )))
-        
-        # Calculate frame count, ensuring it's at least 1
-        frames_at_target_fps = max(1, int(duration * target_fps))
+
+        area_z = min(self.seq_len, self.max_area / (dh * dw), (h // dh) * (w // dw))
         of = min(
-            (frames_at_target_fps - 1) // df + 1,
-            int(self.seq_len / rand_area_z)
+            (int(duration * target_fps) - 1) // df + 1,
+            int(self.seq_len / area_z)
         )
-        of = max(1, of)  # Ensure at least 1 frame
-        
-        # Calculate target shape
-        target_area_z = min(max_area_z, int(self.seq_len / of))
+
+        # deduce target shape of the [latent video]
+        target_area_z = min(area_z, int(self.seq_len / of))
         oh = round(np.sqrt(target_area_z * ratio))
         ow = int(target_area_z / oh)
-        oh = max(1, oh)
-        ow = max(1, ow)
-        
         of = (of - 1) * df + 1
         oh *= dh
         ow *= dw
-        
-        # Handle special case for very short videos
-        if len(frame_timestamps) <= 1:
-            return [0], (x1, x2, y1, y2), (oh, ow), target_fps
-        
-        # Sample frame IDs
+
+        # sample frame ids
         target_duration = of / target_fps
-        target_duration = min(target_duration, duration)
-        
-        if self.zero_start:
-            begin = 0.
-        else:
-            max_begin = max(0., duration - target_duration)
-            begin = rng.uniform(0, max_begin) if max_begin > 0 else 0.
-        
-        if of == 1:
-            # Use middle frame for single-frame output
-            frame_ids = [len(frame_timestamps) // 2]
-        else:
-            # Calculate timestamps and find nearest frames
-            timestamps = np.linspace(begin, begin + target_duration, of)
-            frame_ids = []
-            
-            for ts in timestamps:
-                # Find the closest frame based on timestamp
-                frame_idx = int(np.clip(ts * fps, 0, len(frame_timestamps) - 1))
-                frame_ids.append(frame_idx)
-        
+        begin = 0. if self.zero_start else rng.uniform(0, duration - target_duration)
+        timestamps = np.linspace(begin, begin + target_duration, of)
+        frame_ids = np.argmax(np.logical_and(
+            timestamps[:, None] >= frame_timestamps[None, :, 0],
+            timestamps[:, None] < frame_timestamps[None, :, 1]
+        ), axis=1).tolist()
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
-    
+
     def _get_frameid_bbox_adjust_last(self, fps, frame_timestamps, h, w, crop_box, rng):
-        duration = frame_timestamps[-1, 1]
-        
+        duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         h, w = y2 - y1, x2 - x1
         ratio = h / w
         df, dh, dw = self.downsample
-        
-        # min/max area of the [latent video]
-        min_area_z = self.min_area / (dh * dw)
-        max_area_z = min(self.seq_len, self.max_area / (dh * dw), (h // dh) * (w // dw))
-        if min_area_z > max_area_z:
-            min_area_z, max_area_z = max_area_z, min_area_z
-        
-        # Sample a frame number
-        rand_area_z = np.square(np.power(2, rng.uniform(
-            np.log2(np.sqrt(min_area_z)),
-            np.log2(np.sqrt(max_area_z))
-        )))
-        
-        # Calculate frame count, ensuring it's at least 1
-        num_frames = len(frame_timestamps)
-        max_frames = (num_frames - 1) // df + 1
-        desired_frames = int(self.seq_len / rand_area_z)
-        of = min(max_frames, desired_frames)
-        of = max(1, of)  # Ensure at least 1 frame
-        
-        # Calculate target shape
-        target_area_z = min(max_area_z, int(self.seq_len / of))
+
+        area_z = min(self.seq_len, self.max_area / (dh * dw), (h // dh) * (w // dw))
+        of = min(
+            (len(frame_timestamps) - 1) // df + 1,
+            int(self.seq_len / area_z)
+        )
+
+        # deduce target shape of the [latent video]
+        target_area_z = min(area_z, int(self.seq_len / of))
         oh = round(np.sqrt(target_area_z * ratio))
         ow = int(target_area_z / oh)
-        oh = max(1, oh)
-        ow = max(1, ow)
-        
         of = (of - 1) * df + 1
         oh *= dh
         ow *= dw
-        
-        # Handle special case for very short videos
-        if num_frames <= 1:
-            return [0], (x1, x2, y1, y2), (oh, ow), fps
-        
-        # Calculate target FPS and sample frames
+
+        # sample frame ids
         target_duration = duration
         target_fps = of / target_duration
-        
-        if of == 1:
-            # Use middle frame for single-frame output
-            frame_ids = [num_frames // 2]
-        else:
-            # Calculate evenly spaced frames
-            frame_ids = np.linspace(0, num_frames - 1, of, dtype=int).tolist()
-        
+        timestamps = np.linspace(0., target_duration, of)
+        frame_ids = np.argmax(np.logical_and(
+            timestamps[:, None] >= frame_timestamps[None, :, 0],
+            timestamps[:, None] <= frame_timestamps[None, :, 1]
+        ), axis=1).tolist()
+        # print(oh, ow, of, target_duration, target_fps, len(frame_timestamps), len(frame_ids))
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
 
 
@@ -284,101 +223,36 @@ class VaceVideoProcessor(object):
 
     def load_video_pair(self, data_key, data_key2, crop_box=None, seed=2024, **kwargs):
         return self.load_video_batch(data_key, data_key2, crop_box=crop_box, seed=seed, **kwargs)
+
     def load_video_batch(self, *data_key_batch, crop_box=None, seed=2024, **kwargs):
-        print("II")
-        rng = np.random.default_rng(seed)
-        
-        # Read videos using OpenCV
-        import cv2
-        import torch
-        videos_data = []
-        video_lengths = []
-        
+        rng = np.random.default_rng(seed + hash(data_key_batch[0]) % 10000)
+        # read video
+        import decord
+        decord.bridge.set_bridge('torch')
+        readers = []
         for data_k in data_key_batch:
-            cap = cv2.VideoCapture(data_k)
-            if not cap.isOpened():
-                raise ValueError(f"Could not open video file: {data_k}")
-            
-            # Get video properties
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            if fps <= 0:  # Handle invalid FPS
-                fps = 30.0  # Assume a reasonable default
-            
-            total_frames = 0
-            frames = []
-            success = True
-            
-            # Read all frames to ensure accurate count
-            while success:
-                success, frame = cap.read()
-                if success:
-                    # Convert BGR to RGB
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    frames.append(frame)
-                    total_frames += 1
-            
-            cap.release()
-            
-            if not frames:
-                raise ValueError(f"No frames could be read from: {data_k}")
-            
-            video_lengths.append(total_frames)
-            videos_data.append(frames)
-        
-        # Get the minimum number of frames across all videos
-        length = min(video_lengths)
-        
-        # Get dimensions from the first frame
-        h, w = videos_data[0][0].shape[:2]
-        x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
-        h, w = y2 - y1, x2 - x1
-        
-        # Calculate dimensions while keeping all frames
-        df, dh, dw = self.downsample
-        ratio = h / w
-        
-        # Calculate area per frame to stay within seq_len constraint
-        # If every frame is kept, we need to adjust the spatial dimensions
-        min_area_z = self.min_area / (dh * dw)
-        total_frames_after_downsample = (length - 1) // df + 1  # Number of frames after temporal downsampling
-        
-        # Adjust max_area based on number of frames
-        max_area_z = min(
-            self.seq_len // total_frames_after_downsample,  # Ensure we stay within seq_len
-            self.max_area / (dh * dw),                     # Original max area constraint
-            (h // dh) * (w // dw)                          # Original spatial constraint
-        )
-        
-        # Ensure min_area_z <= max_area_z
-        if min_area_z > max_area_z:
-            min_area_z, max_area_z = max_area_z, min_area_z
-        
-        # Calculate target area within constraints
-        target_area_z = max_area_z  # Use max possible area per frame
-        
-        # Calculate output dimensions
-        oh = round(np.sqrt(target_area_z * ratio)) * dh
-        ow = round(target_area_z / (oh / dh)) * dw
-        
-        # Use all frames (with temporal downsampling if df > 1)
-        frame_ids = []
-        for i in range(0, length, df):
-            frame_ids.append(i)
-        
-        # Calculate target fps based on original fps and downsampling
-        target_fps = fps / df
-        
-        # Extract selected frames and preprocess
-        videos = []
-        for video_frames in videos_data:
-            selected_frames = [video_frames[fid][y1:y2, x1:x2] for fid in frame_ids]
-            # Stack frames and convert to torch tensor
-            frames_array = np.stack(selected_frames, axis=0)
-            frames_tensor = torch.from_numpy(frames_array)
-            processed_video = self._video_preprocess(frames_tensor, oh, ow)
-            videos.append(processed_video)
-        
-        return *videos, frame_ids, (oh, ow), target_fps
+            reader = decord.VideoReader(data_k)
+            readers.append(reader)
+
+        fps = readers[0].get_avg_fps()
+        length = min([len(r) for r in readers])
+        print(fps)
+        print(length)
+        frame_timestamps = [readers[0].get_frame_timestamp(i) for i in range(length)]
+        print(len(frame_timestamps))
+        print(frame_timestamps)
+        frame_timestamps = np.array(frame_timestamps, dtype=np.float32)
+        print(len(frame_timestamps))
+        print(frame_timestamps)
+        h, w = readers[0].next().shape[:2]
+        frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
+
+        # preprocess video
+        videos = [reader.get_batch(frame_ids)[:, y1:y2, x1:x2, :] for reader in readers]
+        videos = [self._video_preprocess(video, oh, ow) for video in videos]
+        print(videos)
+        return *videos, frame_ids, (oh, ow), fps
+        # return videos if len(videos) > 1 else videos[0]
 
 
 def prepare_source(src_video, src_mask, src_ref_images, num_frames, image_size, device):

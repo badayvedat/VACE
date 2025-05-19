@@ -328,42 +328,50 @@ class VaceVideoProcessor(object):
         
         # Get dimensions from the first frame
         h, w = videos_data[0][0].shape[:2]
-        x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         
-        # Calculate some basic dimensions
-        df, dh, dw = self.downsample
-        min_area_z = self.min_area / (dh * dw)
-        max_area_z = min(self.seq_len, self.max_area / (dh * dw), ((y2-y1) // dh) * ((x2-x1) // dw))
-        if min_area_z > max_area_z:
-            min_area_z, max_area_z = max_area_z, min_area_z
-        ratio = (y2 - y1) / (x2 - x1)
+        # Special handling for very short videos (less than 1s or 24 frames)
+        SHORT_VIDEO_THRESHOLD = 24  # Typical threshold for short videos
         
-        # For very short videos, use all frames without skipping
-        if length <= self.seq_len // min_area_z:  # If video is short enough to use all frames
-            # Calculate the maximum possible frames after downsampling
-            max_possible_frames = (length - 1) // df + 1
+        if length < SHORT_VIDEO_THRESHOLD:
+            # For short videos, calculate frame timestamps explicitly
+            duration = length / fps
+            frame_timestamps = np.zeros((length, 2), dtype=np.float32)
             
-            # Calculate target shape for this number of frames
-            target_area_z = min(max_area_z, int(self.seq_len / max_possible_frames))
-            oh = round(np.sqrt(target_area_z * ratio)) * dh
-            ow = round(target_area_z / (oh / dh)) * dw
-            oh = max(dh, oh)  # Ensure at least one latent pixel
-            ow = max(dw, ow)  # Ensure at least one latent pixel
+            # Create timestamps with proper intervals even for short videos
+            for i in range(length):
+                start_time = i / fps
+                end_time = (i + 1) / fps
+                frame_timestamps[i, 0] = start_time
+                frame_timestamps[i, 1] = end_time
             
-            # Use all frames (or downsample if df > 1)
-            frame_ids = []
-            for i in range(0, length, df):
-                frame_ids.append(i)
+            # Call the frame selection method
+            frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
             
-            # If we ended up with no frames, take at least one
-            if not frame_ids:
-                frame_ids = [0]
-            
-            # Set target_fps based on original fps and df
-            target_fps = fps / df
+            # For EXTREMELY short videos (1-2 frames), ensure we use all available frames
+            if length <= 2:
+                # For single-frame videos, use that frame
+                if length == 1:
+                    frame_ids = [0]
+                # For two-frame videos, use both frames
+                else:
+                    frame_ids = [0, 1]
+                
+                # Calculate dimensions
+                df, dh, dw = self.downsample
+                min_area_z = self.min_area / (dh * dw)
+                max_area_z = min(self.seq_len, self.max_area / (dh * dw), (h // dh) * (w // dw))
+                if min_area_z > max_area_z:
+                    min_area_z, max_area_z = max_area_z, min_area_z
+                
+                # Calculate output dimensions
+                ratio = (y2 - y1) / (x2 - x1) if crop_box else h / w
+                target_area_z = min(max_area_z, int(self.seq_len / len(frame_ids)))
+                oh = round(np.sqrt(target_area_z * ratio)) * dh
+                ow = round(target_area_z / (oh / dh)) * dw
+                
+                x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         else:
-            # For longer videos, use the normal frame selection logic
-            # Calculate frame timestamps
+            # For normal-length videos, use the standard approach
             duration = length / fps
             frame_timestamps = np.zeros((length, 2), dtype=np.float32)
             for i in range(length):
@@ -372,8 +380,12 @@ class VaceVideoProcessor(object):
                 frame_timestamps[i, 0] = start_time
                 frame_timestamps[i, 1] = end_time
             
-            # Use the existing frame selection logic
+            # Call the normal frame selection method
             frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
+        
+        # Ensure we have at least one valid frame ID
+        if not frame_ids:
+            frame_ids = [0]
         
         # Ensure all frame IDs are within bounds
         frame_ids = [min(max(0, fid), length-1) for fid in frame_ids]

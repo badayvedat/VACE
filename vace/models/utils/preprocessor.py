@@ -68,6 +68,7 @@ class VaceImageProcessor(object):
         return self.load_image_batch(data_key, data_key2, **kwargs)
 
     def load_image_batch(self, *data_key_batch, normalize=True, seq_len=None, **kwargs):
+        print("I")
         seq_len = self.seq_len if seq_len is None else seq_len
         imgs = []
         for data_key in data_key_batch:
@@ -284,6 +285,7 @@ class VaceVideoProcessor(object):
     def load_video_pair(self, data_key, data_key2, crop_box=None, seed=2024, **kwargs):
         return self.load_video_batch(data_key, data_key2, crop_box=crop_box, seed=seed, **kwargs)
     def load_video_batch(self, *data_key_batch, crop_box=None, seed=2024, **kwargs):
+        print("II")
         rng = np.random.default_rng(seed)
         
         # Read videos using OpenCV
@@ -328,67 +330,43 @@ class VaceVideoProcessor(object):
         
         # Get dimensions from the first frame
         h, w = videos_data[0][0].shape[:2]
+        x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
+        h, w = y2 - y1, x2 - x1
         
-        # Special handling for very short videos (less than 1s or 24 frames)
-        SHORT_VIDEO_THRESHOLD = 24  # Typical threshold for short videos
+        # Calculate dimensions while keeping all frames
+        df, dh, dw = self.downsample
+        ratio = h / w
         
-        if length < SHORT_VIDEO_THRESHOLD:
-            # For short videos, calculate frame timestamps explicitly
-            duration = length / fps
-            frame_timestamps = np.zeros((length, 2), dtype=np.float32)
-            
-            # Create timestamps with proper intervals even for short videos
-            for i in range(length):
-                start_time = i / fps
-                end_time = (i + 1) / fps
-                frame_timestamps[i, 0] = start_time
-                frame_timestamps[i, 1] = end_time
-            
-            # Call the frame selection method
-            frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
-            
-            # For EXTREMELY short videos (1-2 frames), ensure we use all available frames
-            if length <= 2:
-                # For single-frame videos, use that frame
-                if length == 1:
-                    frame_ids = [0]
-                # For two-frame videos, use both frames
-                else:
-                    frame_ids = [0, 1]
-                
-                # Calculate dimensions
-                df, dh, dw = self.downsample
-                min_area_z = self.min_area / (dh * dw)
-                max_area_z = min(self.seq_len, self.max_area / (dh * dw), (h // dh) * (w // dw))
-                if min_area_z > max_area_z:
-                    min_area_z, max_area_z = max_area_z, min_area_z
-                
-                # Calculate output dimensions
-                ratio = (y2 - y1) / (x2 - x1) if crop_box else h / w
-                target_area_z = min(max_area_z, int(self.seq_len / len(frame_ids)))
-                oh = round(np.sqrt(target_area_z * ratio)) * dh
-                ow = round(target_area_z / (oh / dh)) * dw
-                
-                x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
-        else:
-            # For normal-length videos, use the standard approach
-            duration = length / fps
-            frame_timestamps = np.zeros((length, 2), dtype=np.float32)
-            for i in range(length):
-                start_time = i / fps
-                end_time = (i + 1) / fps
-                frame_timestamps[i, 0] = start_time
-                frame_timestamps[i, 1] = end_time
-            
-            # Call the normal frame selection method
-            frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
+        # Calculate area per frame to stay within seq_len constraint
+        # If every frame is kept, we need to adjust the spatial dimensions
+        min_area_z = self.min_area / (dh * dw)
+        total_frames_after_downsample = (length - 1) // df + 1  # Number of frames after temporal downsampling
         
-        # Ensure we have at least one valid frame ID
-        if not frame_ids:
-            frame_ids = [0]
+        # Adjust max_area based on number of frames
+        max_area_z = min(
+            self.seq_len // total_frames_after_downsample,  # Ensure we stay within seq_len
+            self.max_area / (dh * dw),                     # Original max area constraint
+            (h // dh) * (w // dw)                          # Original spatial constraint
+        )
         
-        # Ensure all frame IDs are within bounds
-        frame_ids = [min(max(0, fid), length-1) for fid in frame_ids]
+        # Ensure min_area_z <= max_area_z
+        if min_area_z > max_area_z:
+            min_area_z, max_area_z = max_area_z, min_area_z
+        
+        # Calculate target area within constraints
+        target_area_z = max_area_z  # Use max possible area per frame
+        
+        # Calculate output dimensions
+        oh = round(np.sqrt(target_area_z * ratio)) * dh
+        ow = round(target_area_z / (oh / dh)) * dw
+        
+        # Use all frames (with temporal downsampling if df > 1)
+        frame_ids = []
+        for i in range(0, length, df):
+            frame_ids.append(i)
+        
+        # Calculate target fps based on original fps and downsampling
+        target_fps = fps / df
         
         # Extract selected frames and preprocess
         videos = []

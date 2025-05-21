@@ -149,16 +149,6 @@ class VaceVideoProcessor(object):
         return self.resize_crop(video, oh, ow)
     
     def _transform_timestamps(self, frame_timestamps):
-        """
-        Transform timestamps with identical start/end times to overlapping intervals.
-        
-        Args:
-            frame_timestamps: numpy array of shape (n, 2) containing start and end times
-            
-        Returns:
-            Transformed numpy array of shape (n, 2) with overlapping intervals
-        """
-        # Create a copy to avoid modifying the original array
         transformed = np.copy(frame_timestamps)
         
         # Find transition point (where timestamps change from identical to different values)
@@ -210,7 +200,7 @@ class VaceVideoProcessor(object):
     def _get_frameid_bbox_default(self, fps, frame_timestamps, h, w, crop_box, rng):
         # Transform the frame timestamps to have overlapping intervals
         frame_timestamps = self._transform_timestamps(frame_timestamps)
-        print(frame_timestamps)
+        
         target_fps = min(fps, self.max_fps)
         duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
@@ -245,7 +235,7 @@ class VaceVideoProcessor(object):
     def _get_frameid_bbox_adjust_last(self, fps, frame_timestamps, h, w, crop_box, rng):
         # Transform the frame timestamps to have overlapping intervals
         frame_timestamps = self._transform_timestamps(frame_timestamps)
-        print(frame_timestamps)
+        
         duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         h, w = y2 - y1, x2 - x1

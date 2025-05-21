@@ -121,7 +121,7 @@ class WanVace(WanT2V):
             min_fps=self.config.sample_fps,
             max_fps=self.config.sample_fps,
             zero_start=True,
-            seq_len=92760,
+            seq_len=32760,
             keep_last=True)
 
     def vace_encode_frames(self, frames, ref_images, masks=None, vae=None):
@@ -195,9 +195,9 @@ class WanVace(WanT2V):
         area = image_size[0] * image_size[1]
         self.vid_proc.set_area(area)
         if area == 720*1280:
-            self.vid_proc.set_seq_len(92760)
+            self.vid_proc.set_seq_len(75600)
         elif area == 480*832:
-            self.vid_proc.set_seq_len(92760)
+            self.vid_proc.set_seq_len(32760)
         else:
             raise NotImplementedError(f'image_size {image_size} is not supported')
 

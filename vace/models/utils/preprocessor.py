@@ -8,6 +8,7 @@ import torchvision.transforms.functional as TF
 
 
 class VaceImageProcessor(object):
+    # Your original VaceImageProcessor code remains unchanged
     def __init__(self, downsample=None, seq_len=None):
         self.downsample = downsample
         self.seq_len = seq_len
@@ -146,8 +147,70 @@ class VaceVideoProcessor(object):
 
     def _video_preprocess(self, video, oh, ow):
         return self.resize_crop(video, oh, ow)
+    
+    def _transform_timestamps(self, frame_timestamps):
+        """
+        Transform timestamps with identical start/end times to overlapping intervals.
+        
+        Args:
+            frame_timestamps: numpy array of shape (n, 2) containing start and end times
+            
+        Returns:
+            Transformed numpy array of shape (n, 2) with overlapping intervals
+        """
+        # Create a copy to avoid modifying the original array
+        transformed = np.copy(frame_timestamps)
+        
+        # Find transition point (where timestamps change from identical to different values)
+        transition_index = 0
+        for i in range(len(frame_timestamps)):
+            if frame_timestamps[i, 0] != frame_timestamps[i, 1]:
+                transition_index = i
+                break
+        
+        # Process frames before transition (identical start/end times)
+        for i in range(transition_index):
+            # For all frames except the last one in this section
+            if i < transition_index - 1:
+                # Calculate midpoint between current frame's end and next frame's start
+                avg_time = (frame_timestamps[i, 1] + frame_timestamps[i + 1, 0]) / 2
+                
+                # If this is the first frame
+                if i == 0:
+                    transformed[i, 1] = avg_time
+                else:
+                    # Use previous frame's end time as start time
+                    transformed[i, 0] = transformed[i - 1, 1]
+                    transformed[i, 1] = avg_time
+            else:
+                # For the last frame before transition
+                next_start = frame_timestamps[transition_index, 0]
+                if i == 0:
+                    transformed[i, 1] = next_start
+                else:
+                    transformed[i, 0] = transformed[i - 1, 1]
+                    transformed[i, 1] = next_start
+        
+        # Process frames after transition (different start/end times)
+        for i in range(transition_index, len(frame_timestamps)):
+            if i == transition_index:
+                # First frame after transition
+                if transition_index == 0:
+                    # If this is the very first frame, keep original start time
+                    pass
+                else:
+                    # Use end time of last processed frame as start time
+                    transformed[i, 0] = transformed[transition_index - 1, 1]
+            else:
+                # For subsequent frames, use end time of previous frame as start time
+                transformed[i, 0] = transformed[i - 1, 1]
+        
+        return transformed
 
     def _get_frameid_bbox_default(self, fps, frame_timestamps, h, w, crop_box, rng):
+        # Transform the frame timestamps to have overlapping intervals
+        frame_timestamps = self._transform_timestamps(frame_timestamps)
+        
         target_fps = min(fps, self.max_fps)
         duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
@@ -169,44 +232,20 @@ class VaceVideoProcessor(object):
         oh *= dh
         ow *= dw
 
-        # Check for identical timestamps and fix them
-        epsilon = 1e-6
-        frame_timestamps_copy = frame_timestamps.copy()  # Create a copy to avoid modifying the original
-        for i in range(len(frame_timestamps_copy)):
-            if np.allclose(frame_timestamps_copy[i, 0], frame_timestamps_copy[i, 1]):
-                # If start and end are the same, create a small interval
-                mid_point = frame_timestamps_copy[i, 0]
-                frame_timestamps_copy[i, 0] = mid_point - epsilon
-                frame_timestamps_copy[i, 1] = mid_point + epsilon
-
         # sample frame ids
         target_duration = of / target_fps
         begin = 0. if self.zero_start else rng.uniform(0, duration - target_duration)
         timestamps = np.linspace(begin, begin + target_duration, of)
-        
-        # Improved frame selection logic with fallback
-        frame_ids = []
-        for t in timestamps:
-            # Find frames where timestamp falls within the frame interval
-            matches = np.where(np.logical_and(
-                t >= frame_timestamps_copy[:, 0],
-                t < frame_timestamps_copy[:, 1]
-            ))[0]
-            
-            if len(matches) > 0:
-                # Use the first matching frame
-                frame_ids.append(matches[0])
-            else:
-                # Fallback: find the closest frame if no exact match
-                distances = np.minimum(
-                    np.abs(t - frame_timestamps_copy[:, 0]),
-                    np.abs(t - frame_timestamps_copy[:, 1])
-                )
-                frame_ids.append(np.argmin(distances))
-        
+        frame_ids = np.argmax(np.logical_and(
+            timestamps[:, None] >= frame_timestamps[None, :, 0],
+            timestamps[:, None] < frame_timestamps[None, :, 1]
+        ), axis=1).tolist()
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
 
     def _get_frameid_bbox_adjust_last(self, fps, frame_timestamps, h, w, crop_box, rng):
+        # Transform the frame timestamps to have overlapping intervals
+        frame_timestamps = self._transform_timestamps(frame_timestamps)
+        
         duration = frame_timestamps[-1].mean()
         x1, x2, y1, y2 = [0, w, 0, h] if crop_box is None else crop_box
         h, w = y2 - y1, x2 - x1
@@ -227,41 +266,14 @@ class VaceVideoProcessor(object):
         oh *= dh
         ow *= dw
 
-        # Check for identical timestamps and fix them
-        epsilon = 1e-6
-        frame_timestamps_copy = frame_timestamps.copy()  # Create a copy to avoid modifying the original
-        for i in range(len(frame_timestamps_copy)):
-            if np.allclose(frame_timestamps_copy[i, 0], frame_timestamps_copy[i, 1]):
-                # If start and end are the same, create a small interval
-                mid_point = frame_timestamps_copy[i, 0]
-                frame_timestamps_copy[i, 0] = mid_point - epsilon
-                frame_timestamps_copy[i, 1] = mid_point + epsilon
-        
         # sample frame ids
         target_duration = duration
         target_fps = of / target_duration
         timestamps = np.linspace(0., target_duration, of)
-        
-        # Improved frame selection logic with fallback
-        frame_ids = []
-        for t in timestamps:
-            # Find frames where timestamp falls within the frame interval
-            matches = np.where(np.logical_and(
-                t >= frame_timestamps_copy[:, 0],
-                t <= frame_timestamps_copy[:, 1]
-            ))[0]
-            
-            if len(matches) > 0:
-                # Use the first matching frame
-                frame_ids.append(matches[0])
-            else:
-                # Fallback: find the closest frame if no exact match
-                distances = np.minimum(
-                    np.abs(t - frame_timestamps_copy[:, 0]),
-                    np.abs(t - frame_timestamps_copy[:, 1])
-                )
-                frame_ids.append(np.argmin(distances))
-        
+        frame_ids = np.argmax(np.logical_and(
+            timestamps[:, None] >= frame_timestamps[None, :, 0],
+            timestamps[:, None] <= frame_timestamps[None, :, 1]
+        ), axis=1).tolist()
         return frame_ids, (x1, x2, y1, y2), (oh, ow), target_fps
 
 
@@ -289,16 +301,18 @@ class VaceVideoProcessor(object):
 
         fps = readers[0].get_avg_fps()
         length = min([len(r) for r in readers])
+        
         frame_timestamps = [readers[0].get_frame_timestamp(i) for i in range(length)]
         frame_timestamps = np.array(frame_timestamps, dtype=np.float32)
+        
         h, w = readers[0].next().shape[:2]
         frame_ids, (x1, x2, y1, y2), (oh, ow), fps = self._get_frameid_bbox(fps, frame_timestamps, h, w, crop_box, rng)
 
         # preprocess video
         videos = [reader.get_batch(frame_ids)[:, y1:y2, x1:x2, :] for reader in readers]
         videos = [self._video_preprocess(video, oh, ow) for video in videos]
+        
         return *videos, frame_ids, (oh, ow), fps
-        # return videos if len(videos) > 1 else videos[0]
 
 
 def prepare_source(src_video, src_mask, src_ref_images, num_frames, image_size, device):
